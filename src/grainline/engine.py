@@ -94,6 +94,8 @@ class ProcessStats:
     highest: int
     estimated_seconds: float
     output: str = ""
+    plates: int = 1
+    note: str = ""
 
 
 @dataclass
@@ -302,7 +304,15 @@ def output_path(source: Path, suffix: str) -> Path:
         raise GcodeError("The file name suffix uses a character Windows can't put in a file name.")
     if cleaned[0] not in "_-.":
         cleaned = "_" + cleaned
-    dest = source.with_name(source.stem + cleaned + source.suffix)
+    name = source.name
+    lower = name.lower()
+    if lower.endswith(".gcode.3mf"):
+        base, ext = name[: -len(".gcode.3mf")], name[-len(".gcode.3mf") :]
+    elif lower.endswith(".3mf"):
+        base, ext = source.stem, ".gcode.3mf"
+    else:
+        base, ext = source.stem, source.suffix
+    dest = source.with_name(base + cleaned + ext)
     if dest.resolve() == source.resolve():
         raise GcodeError("That name would overwrite the original. Add a suffix.")
     return dest
@@ -471,13 +481,31 @@ def process_file(source: Path, dest: Path, settings: Settings, progress=None) ->
     return stats
 
 
-def read_gcode(path: Path) -> str:
-    raw = path.read_bytes()
+def decode_gcode(raw: bytes) -> str:
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return raw.decode("utf-16")
     if raw.startswith(b"\xef\xbb\xbf"):
         return raw.decode("utf-8-sig")
     return raw.decode("utf-8", errors="replace")
+
+
+def read_gcode(path: Path) -> str:
+    return decode_gcode(path.read_bytes())
+
+
+def process_path(
+    source: Path,
+    dest: Path,
+    settings: Settings,
+    plates: list[int] | None = None,
+    progress=None,
+) -> ProcessStats:
+    """Process a plain G-code file, or a Bambu/Orca .gcode.3mf sliced archive."""
+    if source.name.lower().endswith(".3mf"):
+        from grainline.threemf import process_3mf
+
+        return process_3mf(source, dest, settings, plates, progress)
+    return process_file(source, dest, settings, progress)
 
 
 def describe(settings: Settings) -> str:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -18,8 +20,10 @@ from grainline.engine import (
     output_path,
     process_file,
     process_gcode,
+    process_path,
     temperature_for,
 )
+from grainline.threemf import inspect_archive
 
 
 def smooth(**overrides) -> Settings:
@@ -284,6 +288,9 @@ class InjectionTests(unittest.TestCase):
         self.assertEqual(output_path(path, "wood").name, "benchy_wood.gcode")
         self.assertEqual(output_path(path, "_grainline").name, "benchy_grainline.gcode")
         self.assertEqual(output_path(path, "").name, "benchy_grainline.gcode")
+        sliced = Path("benchy.gcode.3mf")
+        self.assertEqual(output_path(sliced, "_grainline").name, "benchy_grainline.gcode.3mf")
+        self.assertEqual(output_path(Path("model.3mf"), "_grainline").name, "model_grainline.gcode.3mf")
         with self.assertRaises(GcodeError):
             output_path(path, "bad:name")
 
@@ -314,6 +321,125 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("M104 S", dest.read_text(encoding="utf-8"))
             self.assertNotIn("Grainline", source.read_text(encoding="utf-8"))
+
+
+PLATE = ";LAYER:0\nG1 X1 Y1 E0.1\n;LAYER:1\nG1 X2 Y2 E0.1\n"
+EMPTY_PLATE = "; no sliced geometry\n"
+
+
+def _write_archive(path: Path, members: dict[str, bytes]) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+
+class SlicedArchiveTests(unittest.TestCase):
+    def test_round_trip_keeps_the_model_and_updates_the_checksum(self) -> None:
+        gcode = PLATE.encode("utf-8")
+        model = b"<model>keep me</model>"
+        thumbnail = b"\x89PNG thumbnail"
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "benchy.gcode.3mf"
+            _write_archive(
+                source,
+                {
+                    "[Content_Types].xml": b"<Types/>",
+                    "3D/3dmodel.model": model,
+                    "Metadata/plate_1.png": thumbnail,
+                    "Metadata/plate_1.gcode": gcode,
+                    "Metadata/plate_1.gcode.md5": hashlib.md5(gcode).hexdigest().encode("ascii") + b"\n",
+                },
+            )
+            original = source.read_bytes()
+            dest = output_path(source, "_grainline")
+            stats = process_path(source, dest, smooth())
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(dest.name, "benchy_grainline.gcode.3mf")
+            self.assertEqual(stats.plates, 1)
+            with zipfile.ZipFile(dest) as archive:
+                names = set(archive.namelist())
+                self.assertIn("3D/3dmodel.model", names)
+                self.assertEqual(archive.read("3D/3dmodel.model"), model)
+                self.assertEqual(archive.read("Metadata/plate_1.png"), thumbnail)
+                rewritten = archive.read("Metadata/plate_1.gcode")
+                self.assertIn(b"M104 S", rewritten)
+                self.assertIn(b"Grainline", rewritten)
+                digest = archive.read("Metadata/plate_1.gcode.md5").strip()
+                self.assertEqual(digest, hashlib.md5(rewritten).hexdigest().encode("ascii"))
+
+    def test_every_plate_is_updated_and_an_empty_plate_is_copied(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "two.gcode.3mf"
+            _write_archive(
+                source,
+                {
+                    "Metadata/plate_1.gcode": PLATE.encode("utf-8"),
+                    "Metadata/plate_2.gcode": PLATE.replace("X1", "X8").encode("utf-8"),
+                    "Metadata/plate_3.gcode": EMPTY_PLATE.encode("utf-8"),
+                    "3D/3dmodel.model": b"model",
+                },
+            )
+            dest = output_path(source, "_grainline")
+            stats = process_path(source, dest, smooth())
+            self.assertEqual(stats.plates, 2)
+            self.assertIn("copied unchanged", stats.note)
+            with zipfile.ZipFile(dest) as archive:
+                self.assertIn(b"M104 S", archive.read("Metadata/plate_1.gcode"))
+                self.assertIn(b"M104 S", archive.read("Metadata/plate_2.gcode"))
+                self.assertEqual(archive.read("Metadata/plate_3.gcode"), EMPTY_PLATE.encode("utf-8"))
+                self.assertEqual(archive.read("3D/3dmodel.model"), b"model")
+
+    def test_one_plate_can_be_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "two.gcode.3mf"
+            second = PLATE.replace("X1", "X8").encode("utf-8")
+            _write_archive(
+                source,
+                {
+                    "Metadata/plate_1.gcode": PLATE.encode("utf-8"),
+                    "Metadata/plate_2.gcode": second,
+                },
+            )
+            dest = output_path(source, "_grainline")
+            stats = process_path(source, dest, smooth(), plates=[2])
+            self.assertEqual(stats.plates, 1)
+            with zipfile.ZipFile(dest) as archive:
+                self.assertEqual(archive.read("Metadata/plate_1.gcode"), PLATE.encode("utf-8"))
+                self.assertIn(b"M104 S", archive.read("Metadata/plate_2.gcode"))
+
+    def test_a_project_without_sliced_gcode_explains_the_export(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "project.3mf"
+            _write_archive(source, {"3D/3dmodel.model": b"<model/>"})
+            with self.assertRaises(GcodeError) as caught:
+                inspect_archive(source)
+            self.assertIn("Export plate sliced file", str(caught.exception))
+            dest = output_path(source, "_grainline")
+            self.assertTrue(dest.name.endswith(".gcode.3mf"))
+            with self.assertRaises(GcodeError):
+                process_path(source, dest, smooth())
+
+    def test_a_processed_archive_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "done.gcode.3mf"
+            _write_archive(
+                source,
+                {"Metadata/plate_1.gcode": ("; Grainline 1.1.0: already\n" + PLATE).encode("utf-8")},
+            )
+            with self.assertRaises(GcodeError) as caught:
+                inspect_archive(source)
+            self.assertIn("already run through Grainline", str(caught.exception))
+
+    def test_cli_writes_a_gcode_3mf(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "part.gcode.3mf"
+            _write_archive(source, {"Metadata/plate_1.gcode": PLATE.encode("utf-8"), "3D/3dmodel.model": b"m"})
+            dest = Path(folder) / "part_grainline.gcode.3mf"
+            code = main([str(source), "-o", str(dest), "--min", "210", "--max", "230", "--style", "smooth"])
+            self.assertEqual(code, 0)
+            with zipfile.ZipFile(dest) as archive:
+                self.assertIn(b"M104 S", archive.read("Metadata/plate_1.gcode"))
+                self.assertEqual(archive.read("3D/3dmodel.model"), b"m")
 
 
 if __name__ == "__main__":

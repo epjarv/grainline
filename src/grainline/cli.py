@@ -6,16 +6,16 @@ import argparse
 import sys
 from pathlib import Path
 
-from grainline.engine import STYLES, GcodeError, Settings, output_path, process_file
+from grainline.engine import STYLES, GcodeError, Settings, output_path, process_path
 from grainline.version import __version__
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grainline",
-        description="Add wood-grain hotend temperatures to sliced G-code.",
+        description="Add wood-grain hotend temperatures to sliced G-code or a Bambu .gcode.3mf file.",
     )
-    parser.add_argument("gcode", nargs="?", help="Sliced G-code file")
+    parser.add_argument("gcode", nargs="?", help="Sliced .gcode file, or a Bambu .gcode.3mf file")
     parser.add_argument("-o", "--output", help="Where to write the new G-code")
     parser.add_argument("--min", dest="temp_min", type=float, default=210)
     parser.add_argument("--max", dest="temp_max", type=float, default=240)
@@ -62,13 +62,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         dest = Path(args.output) if args.output else output_path(source, args.suffix)
-        stats = process_file(source, dest, settings)
+        stats = process_path(source, dest, settings)
     except GcodeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-        print(
-            f"Wrote {stats.output}\n"
-            f"{stats.layers} layers, {stats.injected} temperature commands, "
-            f"{stats.lowest}-{stats.highest} C"
-        )
+    print(
+        f"Wrote {stats.output}\n"
+        f"{stats.layers} layers, {stats.injected} temperature commands, "
+        f"{stats.lowest}-{stats.highest} C"
+    )
     return 0

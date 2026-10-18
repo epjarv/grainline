@@ -24,9 +24,10 @@ from grainline.engine import (
     held_time_temps,
     inspect_gcode,
     output_path,
-    process_file,
+    process_path,
     read_gcode,
 )
+from grainline.threemf import PlateInfo, inspect_archive, is_sliced_archive
 from grainline.prefs import load_prefs, save_prefs
 from grainline.preview import draw_preview
 from grainline.theme import AMBER, AMBER_DARK, BG, CARD, INPUT, LINE, MUTED, TEXT, WARN
@@ -247,7 +248,7 @@ class GrainlineApp(ctk.CTk):
         ).pack(side="left")
         ctk.CTkLabel(
             body,
-            text="Drop a .gcode file anywhere on this window, or press Ctrl+O.",
+            text="Drop a .gcode or Bambu .gcode.3mf file here, or press Ctrl+O.",
             text_color=MUTED,
             font=self.font_small,
             anchor="w",
@@ -264,6 +265,17 @@ class GrainlineApp(ctk.CTk):
             justify="left",
         )
         self.meta.pack(fill="x", pady=(6, 0))
+        self.plates: list[PlateInfo] = []
+        self.plate_menu = ctk.CTkOptionMenu(
+            body,
+            values=["All plates"],
+            command=self._on_plate,
+            fg_color=INPUT,
+            button_color=AMBER_DARK,
+            button_hover_color=AMBER,
+            text_color=TEXT,
+            font=self.font_small,
+        )
 
     def _build_temperature(self, parent) -> None:
         body = self._card(parent, "Temperature")
@@ -523,7 +535,7 @@ class GrainlineApp(ctk.CTk):
         self.output_label.pack(fill="x", pady=(0, 8))
         self.write_btn = ctk.CTkButton(
             parent,
-            text="Make grain G-code",
+            text="Make grain file",
             height=46,
             fg_color=AMBER,
             hover_color=AMBER_DARK,
@@ -576,7 +588,7 @@ class GrainlineApp(ctk.CTk):
         )
         self.log.pack(fill="x", padx=14, pady=(6, 8))
         self._set_log(
-            "Open a G-code file your slicer already produced. Set the temperature range, check the preview, then make a new file."
+            "Open a G-code file, or a .gcode.3mf exported from Bambu Studio. Set the temperature range, check the preview, then make a new file."
         )
         self.folder_btn = ctk.CTkButton(
             log_card,
@@ -596,8 +608,8 @@ class GrainlineApp(ctk.CTk):
                 event = self._events.get_nowait()
                 kind = event[0]
                 if kind == "scanned":
-                    _, path, scan_id, inspection, error = event
-                    self._scanned(path, scan_id, inspection, error)
+                    _, path, scan_id, inspection, error, plates = event
+                    self._scanned(path, scan_id, inspection, error, plates)
                 elif kind == "progress":
                     self.write_btn.configure(text=f"Writing… {event[1]}%")
                 elif kind == "wrote":
@@ -638,7 +650,11 @@ class GrainlineApp(ctk.CTk):
             parent=self,
             initialdir=folder if Path(folder).is_dir() else str(Path.home()),
             title="Open sliced G-code",
-            filetypes=[("G-code", "*.gcode *.gco *.g *.nc"), ("All files", "*.*")],
+            filetypes=[
+                ("Sliced G-code", "*.gcode *.gcode.3mf *.gco *.g *.nc"),
+                ("Bambu sliced file", "*.gcode.3mf"),
+                ("All files", "*.*"),
+            ],
         )
         if chosen:
             self._load_path(chosen)
@@ -652,6 +668,8 @@ class GrainlineApp(ctk.CTk):
         self.path_var.set(str(path))
         self.blocked = ""
         self.inspection = None
+        self.plates = []
+        self.plate_menu.pack_forget()
         self.folder_btn.pack_forget()
         self.meta.configure(text="Reading layers…", text_color=MUTED)
         self.write_btn.configure(state="disabled")
@@ -661,43 +679,103 @@ class GrainlineApp(ctk.CTk):
 
     def _scan(self, path: Path, scan_id: int) -> None:
         try:
-            text = read_gcode(path)
-            if already_processed(text):
-                raise GcodeError(
-                    "This G-code was already run through Grainline. Open the original file from the slicer."
-                )
-            inspection = inspect_gcode(text)
-            error = ""
-            if inspection.layer_count == 0:
-                error = "No layers were found. Open a G-code file exported by your slicer."
+            plates: list[PlateInfo] = []
+            if is_sliced_archive(path):
+                plates = inspect_archive(path)
+                inspection = plates[0].inspection
+                error = ""
+            else:
+                text = read_gcode(path)
+                if already_processed(text):
+                    raise GcodeError(
+                        "This G-code was already run through Grainline. Open the original file from the slicer."
+                    )
+                inspection = inspect_gcode(text)
+                error = ""
+                if inspection.layer_count == 0:
+                    error = "No layers were found. Open a G-code file, or a .gcode.3mf exported from Bambu Studio."
         except GcodeError as exc:
             inspection = None
+            plates = []
             error = str(exc)
         except OSError as exc:
             inspection = None
+            plates = []
             error = f"Couldn't read that file. {exc}"
-        self._events.put(("scanned", path, scan_id, inspection, error))
+        self._events.put(("scanned", path, scan_id, inspection, error, plates))
 
-    def _scanned(self, path: Path, scan_id: int, inspection: Inspection | None, error: str) -> None:
+    def _scanned(
+        self,
+        path: Path,
+        scan_id: int,
+        inspection: Inspection | None,
+        error: str,
+        plates: list[PlateInfo],
+    ) -> None:
         if scan_id != self._scan_id or self.path != path:
             return
         self.inspection = inspection
+        self.plates = plates
         self.blocked = error
+        if len(plates) > 1:
+            labels = [f"Plate {plate.number}" for plate in plates]
+            self.plate_menu.configure(values=["All plates", *labels])
+            self.plate_menu.set("All plates")
+            self.plate_menu.pack(fill="x", pady=(8, 0))
+        else:
+            self.plate_menu.pack_forget()
         if error:
             self.meta.configure(text=error, text_color=WARN)
-        elif inspection is not None:
-            time_bit = ""
-            if inspection.estimated_seconds >= 30:
-                time_bit = f" · about {format_duration(inspection.estimated_seconds)}"
-            word = "layer" if inspection.layer_count == 1 else "layers"
-            flavor = FLAVOR_LABELS.get(inspection.flavor, inspection.flavor)
-            self.meta.configure(
-                text=f"{inspection.layer_count} {word}{time_bit} · {flavor}",
-                text_color=MUTED,
-            )
+        else:
+            self._describe_open_file()
         self.prefs["last_dir"] = str(path.parent)
         self.prefs["last_file"] = str(path)
         self._refresh()
+
+    def _on_plate(self, value: str) -> None:
+        if not self._ready or not self.plates:
+            return
+        if value == "All plates":
+            chosen = self.plates[0]
+        else:
+            number = int(value.rsplit(" ", 1)[-1])
+            chosen = next(plate for plate in self.plates if plate.number == number)
+        self.inspection = chosen.inspection
+        self._describe_open_file()
+        self._refresh()
+
+    def _describe_open_file(self) -> None:
+        inspection = self.inspection
+        if inspection is None:
+            return
+        time_bit = ""
+        if inspection.estimated_seconds >= 30:
+            time_bit = f" · about {format_duration(inspection.estimated_seconds)}"
+        flavor = FLAVOR_LABELS.get(inspection.flavor, inspection.flavor)
+        if self.plates:
+            if len(self.plates) == 1:
+                where = f"Plate {self.plates[0].number}"
+            elif self.plate_menu.get() == "All plates":
+                where = f"{len(self.plates)} plates"
+            else:
+                where = self.plate_menu.get()
+            layers = inspection.layer_count
+            if len(self.plates) > 1 and self.plate_menu.get() == "All plates":
+                layers = sum(plate.inspection.layer_count for plate in self.plates)
+            word = "layer" if layers == 1 else "layers"
+            text = f"Sliced 3MF · {where} · {layers} {word}{time_bit} · {flavor}"
+        else:
+            word = "layer" if inspection.layer_count == 1 else "layers"
+            text = f"{inspection.layer_count} {word}{time_bit} · {flavor}"
+        self.meta.configure(text=text, text_color=MUTED)
+
+    def _plate_numbers(self) -> list[int] | None:
+        if not self.plates:
+            return None
+        if self.plate_menu.get() == "All plates":
+            return [plate.number for plate in self.plates]
+        number = int(self.plate_menu.get().rsplit(" ", 1)[-1])
+        return [number]
 
     def _settings(self) -> Settings | None:
         low = _parse_int(self.min_var.get())
@@ -916,6 +994,8 @@ class GrainlineApp(ctk.CTk):
             return "The color barely moves across this print. Shorten the cycle if you want more bands."
         if self.inspection.flavor == "z-height":
             return "This file has no layer comments, so Grainline is using Z moves. Re-slice with layer comments on if the bands land in the wrong place."
+        if len(self.plates) > 1 and self.plate_menu.get() == "All plates":
+            return "Showing the first plate. Every plate in the file gets the same grain settings."
         return ""
 
     def _sync_write(self, settings: Settings | None) -> None:
@@ -984,21 +1064,22 @@ class GrainlineApp(ctk.CTk):
                 return
         self.write_btn.configure(state="disabled", text="Writing…")
         self._set_log("Writing temperature changes…")
-        threading.Thread(target=self._write_worker, args=(self.path, dest, settings), daemon=True).start()
+        plates = self._plate_numbers()
+        threading.Thread(target=self._write_worker, args=(self.path, dest, settings, plates), daemon=True).start()
 
-    def _write_worker(self, source: Path, dest: Path, settings: Settings) -> None:
+    def _write_worker(self, source: Path, dest: Path, settings: Settings, plates: list[int] | None) -> None:
         def progress(fraction: float) -> None:
             self._events.put(("progress", int(fraction * 100)))
 
         try:
-            stats = process_file(source, dest, settings, progress)
+            stats = process_path(source, dest, settings, plates, progress)
         except Exception as exc:
             self._events.put(("write_failed", exc))
             return
         self._events.put(("wrote", stats))
 
     def _write_failed(self, exc: Exception) -> None:
-        self.write_btn.configure(state="normal", text="Make grain G-code")
+        self.write_btn.configure(state="normal", text="Make grain file")
         message = str(exc) if isinstance(exc, GcodeError) else f"Couldn't write the file.\n{exc}"
         self._set_log(message)
         self._sync_write(self._settings())
@@ -1006,15 +1087,21 @@ class GrainlineApp(ctk.CTk):
 
     def _write_done(self, stats) -> None:
         self.output = Path(stats.output)
-        self.write_btn.configure(state="normal", text="Make grain G-code")
+        self.write_btn.configure(state="normal", text="Make grain file")
         lines = [
             f"Wrote {stats.output}",
             f"{stats.layers} layers · {stats.injected} temperature commands · {stats.lowest}–{stats.highest} °C",
             "The original file was not changed.",
         ]
+        if str(stats.output).lower().endswith(".gcode.3mf"):
+            lines.append("Import this .gcode.3mf back into Bambu Studio.")
+        if stats.plates > 1:
+            lines.append(f"Updated {stats.plates} plates.")
         if stats.replaced:
             noun = "line" if stats.replaced == 1 else "lines"
             lines.append(f"Set aside {stats.replaced} slicer temperature {noun} inside the print.")
+        if stats.note:
+            lines.append(stats.note)
         if stats.flavor == "z-height":
             lines.append("Layers were read from Z moves because the file had no layer comments.")
         self._set_log("\n".join(lines))

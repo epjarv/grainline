@@ -12,11 +12,11 @@ The first time you open it, Windows may take a few seconds while it checks the n
 
 ## Use it
 
-1. Slice the model in your normal slicer and export G-code.
+1. Slice the model and export G-code. In Bambu Studio use **File > Export > Export plate sliced file**, which saves a `.gcode.3mf`.
 2. Open that file in Grainline. You can browse, drop the file on the window, or drop it on `Grainline.exe`.
 3. Set the low and high temperature. Classic is 210–240 °C. Use the range printed on your spool.
 4. Check the preview. Pale is cooler, dark is hotter.
-5. Click **Make grain G-code** and print the new file.
+5. Click **Make grain file**. For a Bambu file, import the new `.gcode.3mf` back into Bambu Studio.
 
 ### What to adjust
 
@@ -27,6 +27,12 @@ The first time you open it, Windows may take a few seconds while it checks the n
 - **Drift while printing** (the default) sends `M104`, so the printer keeps moving while the hotend catches up. That lag is the soft grain. **Pause until hot** sends `M109` and waits at each change. The stripes are harder and the print takes longer.
 
 If the preview barely moves, the cycle is long compared with the print. Shorten the grain width.
+
+## Bambu Studio
+
+Bambu Studio does not export a plain `.gcode` file. Export a sliced plate as `.gcode.3mf`, open that in Grainline, then import the new `.gcode.3mf` with **File > Import > Import plate sliced file**. The model, thumbnails, and other plates stay in the file. Only the G-code temperatures change.
+
+If a file has more than one plate, choose one plate or update all of them.
 
 ## Slicers
 
