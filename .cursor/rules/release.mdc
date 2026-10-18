@@ -1,0 +1,18 @@
+---
+description: Publish every Grainline change to GitHub with a new EXE release
+alwaysApply: true
+---
+
+# Grainline releases
+
+The GitHub project is https://github.com/epjarv/grainline. The version lives in `src/grainline/version.py`.
+
+When you change the app, tests, or packaging:
+
+1. Bump `src/grainline/version.py`. Use a patch bump for fixes and a minor bump for features.
+2. Run `python -m unittest discover -s tests` from the repo root.
+3. Build `dist/Grainline.exe` with `scripts/build.ps1`.
+4. Commit and push to `main`.
+5. Publish a GitHub release tagged `v` plus the version, and attach `dist/Grainline.exe`. Pushing that tag also runs `.github/workflows/release.yml`.
+
+Writes always go to a new G-code file. The default temperature command stays `M104`.
